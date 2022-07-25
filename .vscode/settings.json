@@ -1,0 +1,11 @@
+{
+    "files.associations": {
+        "osdep.h": "c",
+        "cutils.h": "c",
+        "sockets.h": "c",
+        "option.h": "c",
+        "uuid.h": "c",
+        "qemu-common.h": "c",
+        "fprintf-fn.h": "c"
+    }
+}
