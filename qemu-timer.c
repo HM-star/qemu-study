@@ -306,10 +306,14 @@ int qemu_timeout_ns_to_ms(int64_t ns)
 /* qemu implementation of g_poll which uses a nanosecond timeout but is
  * otherwise identical to g_poll
  */
+// g_poll的qemu实现，除了使用了纳秒级别的超时，其他和g_poll相同
 int qemu_poll_ns(GPollFD *fds, guint nfds, int64_t timeout)
 {
+// 如果QEMU配置了PPOLL，则使用PPOLL实现POLL对fd的监听，否则使用g_poll实现poll对fd监听
 #ifdef CONFIG_PPOLL
+    // 如果超时时间小于0，如果IO没有准备好，永远阻塞
     if (timeout < 0) {
+        // 否则阻塞一段时间后返回
         return ppoll((struct pollfd *)fds, nfds, NULL, NULL);
     } else {
         struct timespec ts;

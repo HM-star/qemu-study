@@ -7,5 +7,7 @@
         "uuid.h": "c",
         "qemu-common.h": "c",
         "fprintf-fn.h": "c"
-    }
+    },
+    "files.autoSave": "afterDelay",
+    "files.autoSaveDelay": 10000
 }

@@ -143,16 +143,28 @@ static GArray *gpollfds;
 int qemu_init_main_loop(Error **errp)
 {
     int ret;
+    /*
+    struct pollfd {
+        // 文件描述符
+        int fd;
+        // 等待的事件
+        short events;
+        // 实际发生的事件
+        short revents;
+    }
+    */
+
+    // 保存pollfd结构体指针(被监听的文件描述符)。实际上以链表形式存在
     GSource *src;
     Error *local_error = NULL;
-
+    // 依次创建rt_clock, vm_clock, host_lock三个始终
     init_clocks();
 
     ret = qemu_signal_init();
     if (ret) {
         return ret;
     }
-
+    // 创建qemu定制的事件源qemu_aio_context
     qemu_aio_context = aio_context_new(&local_error);
     if (!qemu_aio_context) {
         error_propagate(errp, local_error);
@@ -160,30 +172,52 @@ int qemu_init_main_loop(Error **errp)
     }
     qemu_notify_bh = qemu_bh_new(notify_event_cb, NULL);
     gpollfds = g_array_new(FALSE, FALSE, sizeof(GPollFD));
+    // 从定制事件源中获取Glib原始的事件源
     src = aio_get_g_source(qemu_aio_context);
+    // 设置事件源的名称aio-context
     g_source_set_name(src, "aio-context");
+    // 将事件源添加到Glib默认事件循环上下文
     g_source_attach(src, NULL);
     g_source_unref(src);
+    // 获取另外一个定制的事件源iohandler_ctx
     src = iohandler_get_g_source();
+    // 设置事件源的名称
     g_source_set_name(src, "io-handler");
+    // 将事件源添加到Glib默认事件循环上下文
     g_source_attach(src, NULL);
     g_source_unref(src);
+
+    // 上面这些代码，qemu事件初始化通过两个事件源封装了QEMU所谓的上下文
+    // qemu_aio_context和iohandler_ctx
+    // 两个事件源被加到默认的事件循环中，default GMainContext
+    // 这两个事件源同属于一个上下文，可以运行在同一个线程中
     return 0;
 }
 
+// 所有就绪事件中最高优先级等级，作为prepare函数的传入传出参数（执行该函数后，会获取最高优先级给该变量）
 static int max_priority;
 
 #ifndef _WIN32
 static int glib_pollfds_idx;
 static int glib_n_poll_fds;
 
+// 获取所有需要进行监听的fd，并且计算一个最小的超时时间
+// 执行了Glib库中的两个接口，为监听做准备并获取需要poll监听的fd
+// g_main_context_prepare  g_main_context_query
 static void glib_pollfds_fill(int64_t *cur_timeout)
 {
+    // GMainContext是Gsource的容器，Gsource可以添加到GMainContext里面
+    // Gsource结构体保存了pollfd，包含文件fd和
     GMainContext *context = g_main_context_default();
     int timeout = 0;
     int64_t timeout_ns;
     int n;
-
+    // 为主循环的监听做准备
+    // 通过该函数会调用相应的prepare回调函数 时间准备好监听以后会返回true
+    // prepare主要做三件事
+    // 1. 查看是否有准备就绪的事件源，如果有返回true 如果没有返回false
+    // 2. 找到最高优先级的准备就绪的事件源，把该优先级赋值给传出参数max_priority
+    // 3. 设置GmainContext.timeout值，表示最近一次要到超时的事件源的时间
     g_main_context_prepare(context, &max_priority);
 
     glib_pollfds_idx = gpollfds->len;
@@ -193,6 +227,8 @@ static void glib_pollfds_fill(int64_t *cur_timeout)
         glib_n_poll_fds = n;
         g_array_set_size(gpollfds, glib_pollfds_idx + glib_n_poll_fds);
         pfds = &g_array_index(gpollfds, GPollFD, glib_pollfds_idx);
+        // 获取实际需要调用的poll 的文件fd
+        // 循环获取
         n = g_main_context_query(context, max_priority, &timeout, pfds,
                                  glib_n_poll_fds);
     } while (n != glib_n_poll_fds);
@@ -205,24 +241,29 @@ static void glib_pollfds_fill(int64_t *cur_timeout)
 
     *cur_timeout = qemu_soonest_timeout(timeout_ns, *cur_timeout);
 }
-
+// 调用 g_main_context_check g_main_context_dispatch
+// 实现事件的是否相应，并将相应的事件进行分发
 static void glib_pollfds_poll(void)
 {
     GMainContext *context = g_main_context_default();
     GPollFD *pfds = &g_array_index(gpollfds, GPollFD, glib_pollfds_idx);
-
+    // 执行完poll之后调用check对事件进行检查，如果事件相应了的就返回的TRUE
     if (g_main_context_check(context, max_priority, pfds, glib_n_poll_fds)) {
+        // 事件相应则调用dispatch将事件进行分发（执行callback）
         g_main_context_dispatch(context);
     }
 }
 
 #define MAX_MAIN_LOOP_SPIN (1000)
 
+// 对事件进行监听
+// 三步：glib_pollfds_fill    qemu_poll_ns    glib_pollfds_fill 
 static int os_host_main_loop_wait(int64_t timeout)
 {
     int ret;
     static int spin_counter;
-
+    // 第一步：准备工作。获取实际需要调用poll的fd
+    // g_main_context_prepare  g_main_context_query
     glib_pollfds_fill(&timeout);
 
     /* If the I/O thread is very busy or we are incorrectly busy waiting in
@@ -250,13 +291,14 @@ static int os_host_main_loop_wait(int64_t timeout)
     } else {
         spin_counter++;
     }
-
+    // 第二步：
+    // 会阻塞主线程，要么返回发生了事件，要么返回一个超时
     ret = qemu_poll_ns((GPollFD *)gpollfds->data, gpollfds->len, timeout);
 
     if (timeout) {
         qemu_mutex_lock_iothread();
     }
-
+    // 第三步：进行事件的检查和分发处理
     glib_pollfds_poll();
     return ret;
 }
@@ -500,11 +542,12 @@ int main_loop_wait(int nonblocking)
     } else {
         timeout_ns = (uint64_t)timeout * (int64_t)(SCALE_MS);
     }
-
+    // 计算最小的time_out值，可以使QEMU及时处理定时器到期事件
     timeout_ns = qemu_soonest_timeout(timeout_ns,
                                       timerlistgroup_deadline_ns(
                                           &main_loop_tlg));
-
+    // os_host_main_loop_wait函数主要涉及下面三个函数  
+    // glib_pollfds_fill    qemu_poll_ns    glib_pollfds_fill 
     ret = os_host_main_loop_wait(timeout_ns);
 #ifdef CONFIG_SLIRP
     slirp_pollfds_poll(gpollfds, (ret < 0));

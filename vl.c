@@ -1596,6 +1596,7 @@ static int machine_help_func(QemuOpts *opts, MachineState *machine)
 
 /***********************************************************/
 /* main execution loop */
+// 主循环执行
 
 struct vm_change_state_entry {
     VMChangeStateHandler *cb;
@@ -1950,7 +1951,7 @@ static bool main_loop_should_exit(void)
     }
     return false;
 }
-
+// 真正主循环函数的实现
 static void main_loop(void)
 {
     bool nonblocking;
@@ -1963,11 +1964,14 @@ static void main_loop(void)
 #ifdef CONFIG_PROFILER
         ti = profile_getclock();
 #endif
+        // 循环执行main_loop_wait函数
         last_io = main_loop_wait(nonblocking);
 #ifdef CONFIG_PROFILER
         dev_time += profile_getclock() - ti;
 #endif
     } while (!main_loop_should_exit());
+    // 上面是do while 语句先执行do中的流程，执行完成之后判断while中的语句决定是否继续执行下去
+    // main_loop_should_exit 判断是否结束主循环
 }
 
 static void version(void)
@@ -2994,6 +2998,7 @@ static int global_init_func(void *opaque, QemuOpts *opts, Error **errp)
     return 0;
 }
 
+// 主函数
 int main(int argc, char **argv, char **envp)
 {
     int i;
@@ -4067,7 +4072,6 @@ int main(int argc, char **argv, char **envp)
         error_report("could not acquire pid file: %s", strerror(errno));
         exit(1);
     }
-
     if (qemu_init_main_loop(&main_loop_err)) {
         error_report_err(main_loop_err);
         exit(1);
@@ -4680,7 +4684,8 @@ int main(int argc, char **argv, char **envp)
     }
 
     os_setup_post();
-
+    // 进行好所有的初始化工作之后
+    // 真正执行 主循环的函数 main_loop()
     main_loop();
     replay_disable_events();
     iothread_stop_all();
