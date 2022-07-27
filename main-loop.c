@@ -138,6 +138,8 @@ void qemu_notify_event(void)
     qemu_bh_schedule(qemu_notify_bh);
 }
 
+// 全局变量，需要监听的fd数组
+// 底层实现相当于C++的vector可以动态增长
 static GArray *gpollfds;
 
 int qemu_init_main_loop(Error **errp)
@@ -218,13 +220,17 @@ static void glib_pollfds_fill(int64_t *cur_timeout)
     // 1. 查看是否有准备就绪的事件源，如果有返回true 如果没有返回false
     // 2. 找到最高优先级的准备就绪的事件源，把该优先级赋值给传出参数max_priority
     // 3. 设置GmainContext.timeout值，表示最近一次要到超时的事件源的时间
+    // 当函数返回TRUE表示事件源已经准备好不需要poll的监听，进入下一步是否对事件源进行处理
+    // 当函数返回FALSE表示事件源没 有准备好，需要poll进行监听等待事件源的相应，并设置一个超时时间
     g_main_context_prepare(context, &max_priority);
 
     glib_pollfds_idx = gpollfds->len;
     n = glib_n_poll_fds;
-    do {
+    // 进入循环 在循环中调用query
+    do { 
         GPollFD *pfds;
         glib_n_poll_fds = n;
+        // 参数gpollfds 是一个全局变量保存了需要监听的fd
         g_array_set_size(gpollfds, glib_pollfds_idx + glib_n_poll_fds);
         pfds = &g_array_index(gpollfds, GPollFD, glib_pollfds_idx);
         // 获取实际需要调用的poll 的文件fd
