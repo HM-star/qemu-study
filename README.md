@@ -308,3 +308,120 @@ struct _GSourceFuncs
     &#x20;       short revents;
     }
 
+
+# QEMU线程模型
+
+现在比较流行的两种架构
+
+1.  并行架构：把那些可以同时执行的工作分成多个进程或是线程
+
+2.  事件驱动架构：通过执行一个主循环来发送事件到handler以此对事件做出反馈处理，通常使用select或者poll系统调用等待多重描述符的方式实现。
+
+QEMU架构：
+
+*   使用上面两种架构的混合架构，使用事件驱动编程和线程相结合
+
+*   为什么：单纯的事件循环的不能利用多个CPU内核，因为只有一个执行线程。
+
+*   参考
+
+    <http://blog.vmsplice.net/2011/03/qemu-internals-overall-architecture-and.html>
+
+整个QEMU线程同步通常使用QEMU大锁。
+
+*   获取锁的函数是：`qemu_mutex_lock_iothread`
+
+*   释放锁的函数是：`qemu_mutex_unlock_iothread`
+
+具体例子，在QEMU主循环中获取锁的过程。
+
+```c
+static int os_host_main_loop_wait(int64_t timeout)
+{
+    int ret;
+    static int spin_counter;
+    
+    glib_pollfds_fill(&timeout);
+    // ......
+
+    if (timeout) {
+        spin_counter = 0;
+        // 释放锁
+        qemu_mutex_unlock_iothread();
+    } else {
+        spin_counter++;
+    }
+
+    ret = qemu_poll_ns((GPollFD *)gpollfds->data, gpollfds->len, timeout);
+
+    if (timeout) {
+    // 获得锁
+        qemu_mutex_lock_iothread();
+    }
+
+    glib_pollfds_poll();
+    return ret;
+}
+```
+
+进一步查看两个函数的实现，可以在`cpus.c`函数中找到具体实现
+
+```c
+void qemu_mutex_lock_iothread(void)
+{
+    // 参数的类型是static unsigned 无符号整形
+    // 原子+1
+    atomic_inc(&iothread_requesting_mutex);
+    /* In the simple case there is no need to bump the VCPU thread out of
+     * TCG code execution.
+     */
+    if (!tcg_enabled() || qemu_in_vcpu_thread() ||
+        !first_cpu || !first_cpu->created) {
+        // 获得大锁 如果锁被占据，则阻塞当前线程
+        qemu_mutex_lock(&qemu_global_mutex);
+        // 原子-1
+        atomic_dec(&iothread_requesting_mutex);
+    } else {
+        // 不会阻塞当前线程，立即返回一个锁的状态 qemu_mutex_trylock
+        if (qemu_mutex_trylock(&qemu_global_mutex)) {
+            qemu_cpu_kick_no_halt();
+            // 获得锁
+            qemu_mutex_lock(&qemu_global_mutex);
+        }
+        // 原子-1
+        atomic_dec(&iothread_requesting_mutex);
+        qemu_cond_broadcast(&qemu_io_proceeded_cond);
+    }
+    iothread_locked = true;
+}
+```
+
+上面涉及到很多知识盲区，atomic\_inc这个函数是一个原子操作，相关知识点总结在[原子操作](https://www.wolai.com/wiMhiY6TNq5r86pePnzdR.md "原子操作")
+
+有关QEMU锁的操作，有下面这些：
+
+```c
+// 初始化锁
+int pthread_mutex_init(pthread_mutex_t *restrict mutex,const pthread_mutexattr_t *restrict attr);  
+// 销毁锁
+int pthread_mutex_destory(pthread_mutex_t *mutex );  
+// 加锁 如果锁被占用，则阻塞当前线程
+int pthread_mutex_lock(pthread_mutex_t *mutex);  
+// 加锁 不会阻塞当前线程，立即返回一个锁的状态
+int pthread_mutex_trylock(pthread_mutex_t *mutex); 
+// 解锁 
+int pthread_mutex_unlock(pthread_mutex_t *mutex);  
+```
+
+底层其实是对pthread库的封装
+
+*   qemu\_mutex\_init –> pthread\_mutex\_init
+
+*   qemu\_mutex\_destroy –> pthread\_mutex\_destroy
+
+*   qemu\_mutex\_lock –> pthread\_mutex\_lock（如果锁被占据，则阻塞当前线程）
+
+*   qemu\_mutex\_trylock –> pthread\_mutex\_trylock（不会阻塞当前线程，会立即返回一个锁的状态值）
+
+*   qemu\_mutex\_unlock –> pthread\_mutex\_unlock
+
