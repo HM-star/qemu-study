@@ -1287,19 +1287,26 @@ bool qemu_mutex_iothread_locked(void)
 
 void qemu_mutex_lock_iothread(void)
 {
+    // 参数的类型是static unsigned 无符号整形
+    // 原子+1
     atomic_inc(&iothread_requesting_mutex);
     /* In the simple case there is no need to bump the VCPU thread out of
      * TCG code execution.
      */
     if (!tcg_enabled() || qemu_in_vcpu_thread() ||
         !first_cpu || !first_cpu->created) {
+        // 获得大锁 如果锁被占据，则阻塞当前线程
         qemu_mutex_lock(&qemu_global_mutex);
+        // 原子-1
         atomic_dec(&iothread_requesting_mutex);
     } else {
+        // 不会阻塞当前线程，立即返回一个锁的状态 qemu_mutex_trylock
         if (qemu_mutex_trylock(&qemu_global_mutex)) {
             qemu_cpu_kick_no_halt();
+            // 获得锁
             qemu_mutex_lock(&qemu_global_mutex);
         }
+        // 原子-1
         atomic_dec(&iothread_requesting_mutex);
         qemu_cond_broadcast(&qemu_io_proceeded_cond);
     }
